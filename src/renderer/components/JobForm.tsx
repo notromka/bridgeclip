@@ -345,7 +345,7 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
             <SettingRow
               className="mt-2"
               title="Check tricky shots with AI vision"
-              description="Checks uncertain shots. May add OpenRouter charges."
+              description="Checks uncertain shots. May add OpenCode Go usage."
               control={<Switch label="AI vision for smart framing" checked={draft.layoutVision} onChange={(layoutVision) => update({ layoutVision })} />}
             />
           )}
@@ -393,9 +393,9 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
       <Group label="Clipping mode">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Clipping mode">
           {([
-            { id: 'quality', label: 'Quality', hint: 'Opus 5.5 planning · MAI Transcribe 2' },
-            { id: 'economy', label: 'Economy', hint: 'GLM 5.3 Flash planning · Whisper Turbo' },
-            { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenRouter models' }
+            { id: 'quality', label: 'Quality', hint: 'Muse Spark planning · local transcription' },
+            { id: 'economy', label: 'Economy', hint: 'Muse Spark planning · visual fallback' },
+            { id: 'advanced', label: 'Advanced', hint: 'Choose your OpenCode Go models' }
           ] as const).map((mode) => {
             const selected = draft.clippingMode === mode.id
             return <button key={mode.id} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1}
@@ -407,7 +407,7 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           })}
         </div>
         {draft.clippingMode === 'advanced' ? <AdvancedModels draft={draft} update={update} /> :
-          <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
+          <p className="mt-2 text-2xs text-ink-subtle">Quality and Economy both plan with Muse Spark via OpenCode Go. Transcription runs locally when available, otherwise Muse plans from video frames. Clip choices and captions may be less accurate without speech.</p>}
       </Group>
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
         <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7" role="group" aria-label="Clip length options">
@@ -544,7 +544,7 @@ function ReviewStep({ draft, trim, onEdit }: {
           ? `${runningCount} jobs are running. This one waits in the queue and starts automatically.`
           : active.length > 0
             ? `Runs alongside ${active.length} other job${active.length === 1 ? '' : 's'}. Up to ${MAX_PARALLEL_JOBS} run at once.`
-            : 'Runs on this computer. Transcription and clip planning bill your OpenRouter account.'}
+            : 'Runs on this computer. Clip planning bills your OpenCode Go account; transcription runs locally.'}
       </p>
     </div>
   )
@@ -585,7 +585,7 @@ function AdvancedModels({ draft, update }: { draft: ClipDraft; update: Update })
   useEffect(() => { void load() }, [load])
   return <div className="mt-3 space-y-4 rounded-xl border border-white/10 p-3">
     <div className="flex items-center justify-between gap-3">
-      <p className="text-xs text-ink-muted">Search OpenRouter’s live model catalog.</p>
+      <p className="text-xs text-ink-muted">Search OpenCode Go’s live model catalog.</p>
       <Button size="sm" variant="ghost" loading={loading} disabled={loading} onClick={() => void load(true)}>Refresh models</Button>
     </div>
     {error && <p role="alert" className="text-xs text-danger">{error}</p>}
@@ -593,7 +593,7 @@ function AdvancedModels({ draft, update }: { draft: ClipDraft; update: Update })
       onChange={(transcriptionModel) => update({ transcriptionModel })} />
     <ModelPicker task="planning" models={catalog?.planning ?? []} value={draft.plannerModel} loading={loading}
       onChange={(plannerModel) => update({ plannerModel })} />
-    <p className="text-2xs text-ink-subtle">Temporary errors are retried with your selected models. No automatic model switching. Usage bills your OpenRouter account. Optional AI framing checks use Gemini and can be changed in Format.</p>
+    <p className="text-2xs text-ink-subtle">Temporary errors are retried with your selected models. No automatic model switching. Usage bills your OpenCode Go account. Optional AI framing checks use Muse vision and can be changed in Format.</p>
   </div>
 }
 
