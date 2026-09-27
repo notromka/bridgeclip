@@ -25,3 +25,13 @@ PySocks
 httpx>=0.26.0
 python-json-logger>=2.0.7
 aiofiles>=23.0.0
+
+# Local speech-to-text (no API key): NVIDIA Parakeet-TDT-0.6B-v2 via
+# sherpa-onnx is tried first (English-only; ~630 MB model auto-expected in
+# the BridgeClip userData models dir, see BRIDGECLIP_PARAKEET_DIR), with
+# faster-whisper as fallback. Both give word timestamps for captions.
+# NOTE: regenerate requirements.lock (uv pip compile) to pin these for
+# reproducible/packaged builds.
+sherpa-onnx>=1.13
+faster-whisper>=1.0
+soundfile>=0.12

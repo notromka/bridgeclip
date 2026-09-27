@@ -12,6 +12,7 @@ import base64
 import json
 import math
 import tempfile
+import threading
 import logging
 import os
 import random
@@ -445,8 +446,114 @@ def find_sentence_start_boundary(
     return timestamp_ms
 
 
+_PARAKEET_FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+_PARAKEET_LOCK = threading.Lock()
+_PARAKEET_RECOGNIZER = None
+
+
+def _parakeet_model_dir() -> Optional[str]:
+    """Locate the local Parakeet-TDT int8 model dir, or None with a log hint."""
+    override = (os.environ.get("BRIDGECLIP_PARAKEET_DIR") or "").strip()
+    candidates = [override] if override else []
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        candidates.append(os.path.join(base, "BridgeClip", "models",
+                                        "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"))
+    else:
+        candidates.append(os.path.join(os.path.expanduser("~"), ".local", "share",
+                                        "bridgeclip", "models",
+                                        "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"))
+    for candidate in candidates:
+        if candidate and all(os.path.isfile(os.path.join(candidate, name)) for name in _PARAKEET_FILES):
+            return candidate
+    logger.info("Parakeet model not found (checked %s); skipping local Parakeet",
+                candidates[0] if candidates else "<none>")
+    return None
+
+
+def _get_parakeet_recognizer(model_dir: str):
+    """Load (once per process) the sherpa-onnx Parakeet recognizer. Thread-safe."""
+    global _PARAKEET_RECOGNIZER
+    with _PARAKEET_LOCK:
+        if _PARAKEET_RECOGNIZER is not None:
+            return _PARAKEET_RECOGNIZER
+        import sherpa_onnx  # type: ignore
+        threads = os.environ.get("BRIDGECLIP_PARAKEET_THREADS", "").strip()
+        num_threads = int(threads) if threads.isdigit() else min(4, os.cpu_count() or 4)
+        logger.info("Loading Parakeet model from %s (%d threads)...", model_dir, num_threads)
+        _PARAKEET_RECOGNIZER = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=os.path.join(model_dir, "encoder.int8.onnx"),
+            decoder=os.path.join(model_dir, "decoder.int8.onnx"),
+            joiner=os.path.join(model_dir, "joiner.int8.onnx"),
+            tokens=os.path.join(model_dir, "tokens.txt"),
+            num_threads=num_threads,
+            sample_rate=16000,
+            feature_dim=80,
+            decoding_method="greedy_search",
+            model_type="nemo_transducer",
+            debug=False,
+        )
+        return _PARAKEET_RECOGNIZER
+
+
+def _parakeet_tokens_to_words(tokens: list, timestamps: list) -> list[tuple[str, int, int]]:
+    """Group BPE tokens into (word, start_ms, end_ms) using token start times."""
+    starts: list[tuple[str, float]] = []
+    for tok, ts in zip(tokens, timestamps):
+        text = str(tok).replace("▁", " ")
+        if not text.strip():
+            continue
+        starts.append((text, float(ts)))
+    words: list[tuple[str, int, int]] = []
+    current: Optional[list] = None
+    for text, ts in starts:
+        if text.startswith(" ") or current is None:
+            if current is not None:
+                words.append((current[0], current[1], current[2]))
+            word = text.strip()
+            start_ms = int(round(ts * 1000))
+            current = [word, start_ms, start_ms]
+        else:
+            current[0] += text
+            current[2] = int(round(ts * 1000))
+    if current is not None:
+        words.append((current[0], current[1], current[2]))
+    # A word ends where the next one starts; the last gets a short tail.
+    timed: list[tuple[str, int, int]] = []
+    for i, (word, start_ms, _end_ms) in enumerate(words):
+        if i + 1 < len(words):
+            end_ms = words[i + 1][1]
+        else:
+            end_ms = start_ms + 300
+        if end_ms <= start_ms:
+            end_ms = start_ms + 80
+        timed.append((word, start_ms, end_ms))
+    return [(w, s, e) for w, s, e in timed if w]
+
+
+def _parakeet_decode_words(recognizer, wav_path: str) -> list[tuple[str, int, int]]:
+    """Decode one 16 kHz mono WAV chunk; returns chunk-relative word timings."""
+    import soundfile as sf  # type: ignore
+    samples, sample_rate = sf.read(wav_path, dtype="float32")
+    try:
+        import numpy as np  # type: ignore
+        if getattr(samples, "ndim", 1) > 1:
+            samples = samples.mean(axis=1)
+        samples = samples.astype("float32")
+    except Exception:
+        pass
+    with _PARAKEET_LOCK:
+        stream = recognizer.create_stream()
+        stream.accept_waveform(int(sample_rate), samples)
+        recognizer.decode_stream(stream)
+        result = stream.result
+    tokens = list(getattr(result, "tokens", []) or [])
+    timestamps = list(getattr(result, "timestamps", []) or [])
+    return _parakeet_tokens_to_words(tokens, timestamps)
+
+
 class TranscriptionService:
-    """Local Parakeet-style speech recognition with word timing for captions."""
+    """Local Parakeet speech recognition with word timing for captions."""
 
     def __init__(self):
         self.settings = get_settings()
@@ -459,6 +566,89 @@ class TranscriptionService:
                 callback(message)
             except Exception:
                 logger.warning("Could not report transcription progress")
+
+    async def _try_parakeet_transcription(
+        self, audio_path: str, language: Optional[str],
+        timeline_offset_seconds: float = 0.0,
+    ) -> Optional[TranscriptionResult]:
+        """Transcribe with local NVIDIA Parakeet-TDT via sherpa-onnx (no API key).
+
+        Model dir: BRIDGECLIP_PARAKEET_DIR or
+        %APPDATA%/BridgeClip/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8
+        (see docs; ~630 MB, English-only). Returns None when unavailable or
+        empty so faster-whisper / remote / visual fallback can proceed.
+        Set BRIDGECLIP_LOCAL_STT=0 to skip all local STT.
+        """
+        if (os.environ.get("BRIDGECLIP_LOCAL_STT") or "").strip() == "0":
+            return None
+        if language not in (None, "auto") and not str(language).lower().startswith("en"):
+            logger.info("Parakeet model is English-only; skipping local Parakeet for language=%s", language)
+            return None
+        model_dir = _parakeet_model_dir()
+        if model_dir is None:
+            return None
+        try:
+            duration = await asyncio.to_thread(self._audio_duration, audio_path)
+        except TranscriptionError:
+            raise
+        except Exception as e:
+            logger.warning("Could not read audio duration: %s", e)
+            return None
+        try:
+            recognizer = await asyncio.to_thread(_get_parakeet_recognizer, model_dir)
+        except Exception as e:
+            logger.warning("Parakeet unavailable, will try other transcription: %s", e)
+            return None
+        segments: list[TranscriptSegment] = []
+        chunk_count = max(1, math.ceil(duration / TRANSCRIPTION_CHUNK_SECONDS))
+        try:
+            with tempfile.TemporaryDirectory(prefix="clip-parakeet-", dir=os.path.dirname(audio_path)) as work:
+                for index in range(chunk_count):
+                    core_start = index * TRANSCRIPTION_CHUNK_SECONDS
+                    core_end = min(duration, core_start + TRANSCRIPTION_CHUNK_SECONDS)
+                    start = max(0.0, core_start - 1.0)
+                    end = min(duration, core_end + 1.0)
+                    chunk_path = audio_path
+                    if chunk_count > 1:
+                        chunk_path = os.path.join(work, "chunk.wav")
+                        await asyncio.to_thread(self._extract_chunk, audio_path, chunk_path, start, end - start)
+                    self._progress(f"Transcribing audio with Parakeet, part {index + 1} of {chunk_count}...")
+                    words = await asyncio.to_thread(_parakeet_decode_words, recognizer, chunk_path)
+                    for word, w_start_ms, w_end_ms in words:
+                        midpoint = (w_start_ms + w_end_ms) / 2000 + start
+                        if core_start <= midpoint < core_end:
+                            shift_ms = round((start + timeline_offset_seconds) * 1000)
+                            segments.append(TranscriptSegment(
+                                w_start_ms + shift_ms, w_end_ms + shift_ms,
+                                word, None,
+                                [TranscriptWord(word, w_start_ms + shift_ms, w_end_ms + shift_ms)],
+                            ))
+        except Exception as e:
+            logger.warning("Parakeet transcription failed, will try other transcription: %s", e)
+            return None
+        if not segments:
+            logger.info("Parakeet heard no speech; trying other transcription")
+            return None
+        # Merge adjacent single-word segments into sentence-like groups for the planner.
+        merged: list[TranscriptSegment] = []
+        for seg in segments:
+            if merged and seg.start_time_ms - merged[-1].end_time_ms <= 2000:
+                prev = merged[-1]
+                prev.end_time_ms = seg.end_time_ms
+                prev.text = f"{prev.text} {seg.text}"
+                prev.words.extend(seg.words)
+            else:
+                merged.append(seg)
+        costs = TranscriptionApiCosts(
+            provider="parakeet-local", model="parakeet-tdt-0.6b-v2-int8",
+            audio_duration_seconds=duration, estimated_cost_usd=0.0, attempts=1,
+        )
+        return TranscriptionResult(
+            segments=merged, full_text=" ".join(s.text for s in merged),
+            language="en", duration_seconds=duration,
+            provider="parakeet-local", model="parakeet-tdt-0.6b-v2-int8",
+            api_costs=costs,
+        )
 
     async def _try_local_transcription(
         self, audio_path: str, language: Optional[str]
@@ -643,7 +833,10 @@ class TranscriptionService:
             raise TranscriptionError("Audio file not found", reason="audio_missing")
         if translate_to_english:
             raise TranscriptionError("Audio translation is not supported", reason="translation_unsupported")
-        # Try local Parakeet/faster-whisper first (no API key, no OpenRouter).
+        # Try local STT first (no API key): Parakeet, then faster-whisper.
+        parakeet = await self._try_parakeet_transcription(audio_path, language, timeline_offset_seconds)
+        if parakeet is not None:
+            return parakeet
         local = await self._try_local_transcription(audio_path, language)
         if local is not None:
             return local
