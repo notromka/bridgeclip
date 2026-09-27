@@ -6,9 +6,11 @@ import { randomUUID } from 'crypto'
 /**
  * BridgeClip is bring-your-own-key: every provider call is made from this
  * machine with the user's own keys. Keys are encrypted with the OS keychain
- * (safeStorage) when it is available.
+ * (safeStorage) when it is available. Provider is OpenCode Go (Muse Spark).
  */
 export interface AppSettings {
+  opencodeApiKey: string
+  /** Deprecated alias: migrated to opencodeApiKey on load. */
   openrouterApiKey: string
   /** Optional: connects social accounts for posting. Used only by the main process, never sent to the engine. */
   zernioApiKey: string
@@ -18,16 +20,18 @@ export interface AppSettings {
   customVocabulary: string
 }
 
-export type ApiKeyName = 'openrouterApiKey' | 'zernioApiKey'
+export type ApiKeyName = 'opencodeApiKey' | 'openrouterApiKey' | 'zernioApiKey'
 export type PublicSettings = Pick<AppSettings, 'outputDirectory' | 'pythonPath' | 'customVocabulary'> & {
+  opencodeConfigured: boolean
   openrouterConfigured: boolean
   zernioConfigured: boolean
 }
 
-const SECRET_KEYS = ['openrouterApiKey', 'zernioApiKey'] as const
+const SECRET_KEYS = ['opencodeApiKey', 'openrouterApiKey', 'zernioApiKey'] as const
 type SecretKey = (typeof SECRET_KEYS)[number]
 
 const DEFAULT_SETTINGS: AppSettings = {
+  opencodeApiKey: '',
   openrouterApiKey: '',
   zernioApiKey: '',
   outputDirectory: join(app.getPath('home'), 'BridgeClip'),
@@ -35,12 +39,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   customVocabulary: ''
 }
 
-const SETTINGS_VERSION = 7
+const SETTINGS_VERSION = 8
 
 type PersistedSecret = { scheme: 'safeStorage' | 'base64'; value: string } | ''
 
 interface PersistedSettings {
   version: number
+  opencodeApiKey: PersistedSecret
   openrouterApiKey: PersistedSecret
   zernioApiKey: PersistedSecret
   outputDirectory: string
@@ -65,7 +70,8 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     if (settings[key] !== undefined && (typeof settings[key] !== 'string' || settings[key]!.length > 8192 || settings[key]!.includes('\0'))) throw new Error(`Invalid ${key}`)
   }
   const normalized: AppSettings = {
-    openrouterApiKey: (settings.openrouterApiKey ?? DEFAULT_SETTINGS.openrouterApiKey).trim(),
+    opencodeApiKey: (settings.opencodeApiKey ?? (settings as Partial<AppSettings>).openrouterApiKey ?? DEFAULT_SETTINGS.opencodeApiKey).trim(),
+    openrouterApiKey: (settings.openrouterApiKey ?? '').trim(),
     zernioApiKey: (settings.zernioApiKey ?? DEFAULT_SETTINGS.zernioApiKey).trim(),
     outputDirectory: (settings.outputDirectory || DEFAULT_SETTINGS.outputDirectory).trim(),
     pythonPath: (settings.pythonPath || DEFAULT_SETTINGS.pythonPath).trim(),
@@ -158,6 +164,7 @@ function writeSettings(settings: AppSettings): void {
 
   const persisted: PersistedSettings = {
     version: SETTINGS_VERSION,
+    opencodeApiKey: encodeSecret(settings.opencodeApiKey || settings.openrouterApiKey),
     openrouterApiKey: encodeSecret(settings.openrouterApiKey),
     zernioApiKey: encodeSecret(settings.zernioApiKey),
     outputDirectory: settings.outputDirectory,
@@ -186,11 +193,13 @@ export function saveSettings(settings: AppSettings): AppSettings {
 }
 
 export function publicSettings(settings: AppSettings): PublicSettings {
+  const effective = settings.opencodeApiKey || settings.openrouterApiKey
   return {
     outputDirectory: settings.outputDirectory,
     pythonPath: settings.pythonPath,
     customVocabulary: settings.customVocabulary,
-    openrouterConfigured: Boolean(settings.openrouterApiKey),
+    opencodeConfigured: Boolean(effective),
+    openrouterConfigured: Boolean(effective),
     zernioConfigured: Boolean(settings.zernioApiKey)
   }
 }
@@ -206,7 +215,7 @@ export function savePublicSettings(update: Pick<PublicSettings, 'outputDirectory
 }
 
 /**
- * Conservative vocabulary hints for MAI Transcribe 2: one term per line or comma,
+ * Conservative vocabulary hints for local Parakeet STT: one term per line or comma,
  * at most five words and 49 characters each, none of <>{}[]\, deduplicated
  * case-insensitively. These application limits keep phrase hints short and bounded.
  */
@@ -228,12 +237,18 @@ export function vocabularyTerms(value: string): string[] {
 export function replaceApiKey(key: ApiKeyName, value: string): PublicSettings {
   if (!SECRET_KEYS.includes(key) || typeof value !== 'string' || value.length > 8192 || value.includes('\0')) throw new Error('Invalid API key update')
   const current = loadSettings()
-  return publicSettings(saveSettings({ ...current, [key]: value.trim() }))
+  const next = { ...current, [key]: value.trim() }
+  // Keep legacy alias in sync so the engine works with either env name.
+  if (key === 'opencodeApiKey') next.openrouterApiKey = next.openrouterApiKey || value.trim()
+  if (key === 'openrouterApiKey' && !next.opencodeApiKey) next.opencodeApiKey = value.trim()
+  return publicSettings(saveSettings(next))
 }
 
 export function getSettingsForBridge(settings: AppSettings): Record<string, string> {
+  const key = settings.opencodeApiKey || settings.openrouterApiKey
   return {
-    OPENROUTER_API_KEY: settings.openrouterApiKey,
+    OPENCODE_API_KEY: key,
+    OPENROUTER_API_KEY: key,
     LOCAL_MODE: 'true',
     LOCAL_OUTPUT_DIR: settings.outputDirectory
   }

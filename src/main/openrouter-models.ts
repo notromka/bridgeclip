@@ -5,6 +5,22 @@ const CACHE_MS = 10 * 60 * 1000
 let cached: OpenRouterCatalog | null = null
 let pending: Promise<OpenRouterCatalog> | null = null
 
+const OPENCODE_GO_BASE = (process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/go/v1').replace(/\/$/, '')
+
+// Static OpenCode Go catalog: Muse Spark Contributor (Responses API) + Go chat models.
+// Live fetch augments this; static entries guarantee the app works offline.
+const STATIC_PLANNING: OpenRouterModel[] = [
+  { id: 'muse-spark-1.3-contributor', name: 'Muse Spark 1.3 Contributor', contextLength: 1048576, maxOutputTokens: 131072, supportsImages: true, inputPrice: 0.1, outputPrice: 0.2, unavailableReason: null },
+  { id: 'muse-spark-1.2-contributor', name: 'Muse Spark 1.2 Contributor', contextLength: 1048576, maxOutputTokens: 65536, supportsImages: true, inputPrice: 0.1, outputPrice: 0.2, unavailableReason: null },
+  { id: 'kimi-k3', name: 'Kimi K3', contextLength: 262144, maxOutputTokens: 32000, supportsImages: true, inputPrice: 3.0, outputPrice: 15.0, unavailableReason: null },
+  { id: 'glm-5.2', name: 'GLM 5.2', contextLength: 262144, maxOutputTokens: 32000, supportsImages: true, inputPrice: 1.4, outputPrice: 4.4, unavailableReason: null },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextLength: 262144, maxOutputTokens: 32000, supportsImages: false, inputPrice: 1.32, outputPrice: 3.96, unavailableReason: null },
+]
+
+const STATIC_TRANSCRIPTION: OpenRouterModel[] = [
+  { id: 'parakeet-local', name: 'Parakeet Local (offline, no key)', contextLength: null, maxOutputTokens: null, supportsImages: false, inputPrice: 0, outputPrice: 0, unavailableReason: null },
+]
+
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
@@ -17,45 +33,40 @@ function number(value: unknown, positive = false): number | null {
 }
 
 export function parseModelCatalog(value: unknown, task: ModelTask): OpenRouterModel[] {
+  // OpenCode Go /models returns [{id}] without architecture/pricing.
   const data = record(value).data
-  if (!Array.isArray(data) || data.length > 10000) throw new Error('OpenRouter returned an invalid model catalog.')
+  if (!Array.isArray(data) || data.length > 10000) throw new Error('OpenCode Go returned an invalid model catalog.')
   const models = new Map<string, OpenRouterModel>()
+  const statics = task === 'planning' ? STATIC_PLANNING : STATIC_TRANSCRIPTION
+  for (const s of statics) models.set(s.id, s)
   for (const entry of data) {
     const raw = record(entry)
-    const architecture = record(raw.architecture)
-    const inputs = Array.isArray(architecture.input_modalities) ? architecture.input_modalities : []
-    const outputs = Array.isArray(architecture.output_modalities) ? architecture.output_modalities : []
-    if (!isModelId(raw.id) || !inputs.includes(task === 'planning' ? 'text' : 'audio') ||
-        !outputs.includes(task === 'planning' ? 'text' : 'transcription')) continue
-    const parameters = Array.isArray(raw.supported_parameters) ? raw.supported_parameters : []
-    let unavailableReason: string | null = null
-    if (task === 'planning' && !parameters.includes('structured_outputs')) {
-      unavailableReason = 'Does not advertise the structured output required for clip planning.'
-    }
-    if (task === 'transcription' && ['openai/gpt-4o-transcribe', 'microsoft/mai-transcribe-1.5'].includes(raw.id)) {
-      unavailableReason = 'Does not support the timestamped transcripts required for clipping.'
-    }
-    const pricing = record(raw.pricing)
-    models.set(raw.id, {
-      id: raw.id,
-      name: typeof raw.name === 'string' ? raw.name.slice(0, 160).split('').filter((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127).join('') : raw.id,
-      contextLength: number(raw.context_length, true),
-      maxOutputTokens: number(record(raw.top_provider).max_completion_tokens, true),
-      supportsImages: inputs.includes('image'),
-      // Transcription catalog prices have provider-dependent units. Don't label them as token prices.
-      inputPrice: task === 'planning' ? number(pricing.prompt) : null,
-      outputPrice: task === 'planning' ? number(pricing.completion) : null,
-      unavailableReason
+    const id = typeof raw.id === 'string' ? raw.id : ''
+    if (!id) continue
+    // Planning: Muse + Go chat models. Transcription: local only (Go has no STT).
+    if (task === 'transcription') continue
+    if (models.has(id)) continue
+    // Accept Go IDs (no slash) plus legacy slash IDs.
+    if (!/^[a-z0-9][a-z0-9._:-]*$/i.test(id) && !isModelId(id)) continue
+    models.set(id, {
+      id,
+      name: typeof raw.name === 'string' ? raw.name.slice(0, 160) : id,
+      contextLength: null,
+      maxOutputTokens: null,
+      supportsImages: id.toLowerCase().includes('muse') || id.toLowerCase().includes('kimi') || id.toLowerCase().includes('glm'),
+      inputPrice: null,
+      outputPrice: null,
+      unavailableReason: null
     })
   }
-  if (!models.size) throw new Error('OpenRouter returned an empty model catalog. Try refreshing.')
+  if (!models.size) throw new Error('OpenCode Go returned an empty model catalog. Try refreshing.')
   return [...models.values()].sort((a, b) => Number(Boolean(a.unavailableReason)) - Number(Boolean(b.unavailableReason)) || a.name.localeCompare(b.name))
 }
 
 async function fetchModels(task: ModelTask): Promise<OpenRouterModel[]> {
   try {
-    // This is a public, read-only catalog. No API key or user-provided URL leaves the main process.
-    const response = await fetch(`https://openrouter.ai/api/v1/models?output_modalities=${task === 'planning' ? 'text' : 'transcription'}`, {
+    // Public read-only catalog. No API key leaves the main process.
+    const response = await fetch(`${OPENCODE_GO_BASE}/models`, {
       redirect: 'error', signal: AbortSignal.timeout(15000), headers: { Accept: 'application/json' }
     })
     if (!response.ok) {
@@ -64,7 +75,8 @@ async function fetchModels(task: ModelTask): Promise<OpenRouterModel[]> {
     }
     return parseModelCatalog(JSON.parse(await readResponseText(response, 8 * 1024 * 1024)), task)
   } catch {
-    throw new Error('Could not load OpenRouter models. Check your connection and refresh the model list.')
+    // Offline fallback: static catalog so Advanced pickers still work.
+    return task === 'planning' ? STATIC_PLANNING : STATIC_TRANSCRIPTION
   }
 }
 

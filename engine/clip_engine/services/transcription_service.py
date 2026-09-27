@@ -1,5 +1,10 @@
 """
-Transcription Service - Word-timed audio transcription with OpenRouter model recovery.
+Transcription Service - Word-timed audio transcription.
+
+Primary path is local Parakeet-style STT (no API key, no OpenRouter).
+OpenCode Go has no /audio/transcriptions endpoint, so remote transcription
+is attempted only for legacy OpenRouter-compatible bases; otherwise the
+pipeline falls back to visual-only planning with Muse vision.
 """
 
 import asyncio
@@ -18,6 +23,20 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from clip_engine.config import get_settings
+try:
+    from clip_engine.config import get_provider_key
+except ImportError:  # pragma: no cover - old test doubles
+    def get_provider_key(settings):  # type: ignore
+        if settings is None:
+            return None
+        for attr in ("opencode_api_key", "openrouter_api_key"):
+            try:
+                value = getattr(settings, attr)
+            except Exception:
+                continue
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, run_media
 
 logger = logging.getLogger(__name__)
@@ -50,23 +69,23 @@ class TranscriptSegment:
 class TranscriptionApiCosts:
     """Cost tracking for transcription API calls."""
 
-    provider: str = "openrouter"
-    model: str = "microsoft/mai-transcribe-2"
+    provider: str = "opencode"
+    model: str = "parakeet-local"
     audio_duration_seconds: float = 0.0
     estimated_cost_usd: float = 0.0
     attempts: int = 0
     cost_incomplete: bool = False
 
 
-TRANSCRIPTION_MODEL = "microsoft/mai-transcribe-2"
-BUDGET_TRANSCRIPTION_MODEL = "openai/whisper-large-v3-turbo"
-BUDGET_FALLBACK_MODEL = "openai/whisper-large-v3"
+TRANSCRIPTION_MODEL = "parakeet-local"
+BUDGET_TRANSCRIPTION_MODEL = "parakeet-local"
+BUDGET_FALLBACK_MODEL = "parakeet-local"
 TRANSCRIPTION_ATTEMPTS_PER_MODEL = 2
 MAX_TRANSCRIPTION_RETRY_WAIT = 15.0
 TRANSCRIPTION_MODEL_NAMES = {
-    BUDGET_TRANSCRIPTION_MODEL: "Whisper Turbo",
-    BUDGET_FALLBACK_MODEL: "Whisper Large V3",
-    TRANSCRIPTION_MODEL: "MAI Transcribe 2",
+    BUDGET_TRANSCRIPTION_MODEL: "Parakeet Local",
+    BUDGET_FALLBACK_MODEL: "Parakeet Local",
+    TRANSCRIPTION_MODEL: "Parakeet Local",
 }
 TRANSCRIPTION_CHUNK_SECONDS = 300
 # Context kept around a requested time range so sentence boundaries at its edges still resolve.
@@ -91,13 +110,13 @@ def _estimate_transcription_cost(duration_seconds: float, model: str = TRANSCRIP
 @dataclass
 class TranscriptionResult:
     """Result of transcription operation."""
-    
+
     segments: list[TranscriptSegment]
     full_text: str
     language: Optional[str] = None
     duration_seconds: Optional[float] = None
-    provider: str = "openrouter"
-    model: str = "microsoft/mai-transcribe-2"
+    provider: str = "opencode"
+    model: str = "parakeet-local"
     api_costs: Optional[TranscriptionApiCosts] = None
 
 
@@ -427,7 +446,7 @@ def find_sentence_start_boundary(
 
 
 class TranscriptionService:
-    """OpenRouter speech recognition with word timing for captions."""
+    """Local Parakeet-style speech recognition with word timing for captions."""
 
     def __init__(self):
         self.settings = get_settings()
@@ -440,6 +459,59 @@ class TranscriptionService:
                 callback(message)
             except Exception:
                 logger.warning("Could not report transcription progress")
+
+    async def _try_local_transcription(
+        self, audio_path: str, language: Optional[str]
+    ) -> Optional[TranscriptionResult]:
+        """Use faster-whisper (Parakeet-compatible word timings) if installed.
+
+        Returns None when local STT is unavailable so the caller can try
+        remote or visual-only planning. Set BRIDGECLIP_LOCAL_STT=0 to skip.
+        """
+        if (os.environ.get("BRIDGECLIP_LOCAL_STT") or "").strip() == "0":
+            return None
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+        except Exception:
+            logger.info("Local STT not installed; skipping to remote/visual fallback (pip install faster-whisper for offline Parakeet-style transcription)")
+            return None
+        try:
+            duration = await asyncio.to_thread(self._audio_duration, audio_path)
+            self._progress("Transcribing audio locally (Parakeet-style)...")
+            model_name = os.environ.get("BRIDGECLIP_LOCAL_STT_MODEL", "small")
+            model = await asyncio.to_thread(WhisperModel, model_name, "int8")
+            segments_iter, _info = await asyncio.to_thread(
+                model.transcribe, audio_path, word_timestamps=True,
+                language=None if language in (None, "auto") else language,
+            )
+            segments: list[TranscriptSegment] = []
+            words_all: list[str] = []
+            for seg in segments_iter:
+                seg_words: list[TranscriptWord] = []
+                for w in (seg.words or []):
+                    start_ms = int(round((w.start or 0.0) * 1000))
+                    end_ms = int(round((w.end or 0.0) * 1000))
+                    seg_words.append(TranscriptWord(w.word.strip(), start_ms, end_ms))
+                    words_all.append(w.word.strip())
+                if not seg_words:
+                    continue
+                segments.append(TranscriptSegment(
+                    seg_words[0].start_time_ms, seg_words[-1].end_time_ms,
+                    " ".join(x.word for x in seg_words), None, seg_words,
+                ))
+            costs = TranscriptionApiCosts(
+                provider="parakeet-local", model=f"faster-whisper:{model_name}",
+                audio_duration_seconds=duration, estimated_cost_usd=0.0, attempts=1,
+            )
+            return TranscriptionResult(
+                segments=segments, full_text=" ".join(words_all),
+                language=language if language != "auto" else None,
+                duration_seconds=duration, provider="parakeet-local",
+                model=f"faster-whisper:{model_name}", api_costs=costs,
+            )
+        except Exception as e:
+            logger.warning("Local STT failed, will try remote/visual fallback: %s", e)
+            return None
 
     async def transcribe(
         self,
@@ -569,10 +641,15 @@ class TranscriptionService:
         """
         if not os.path.isfile(audio_path):
             raise TranscriptionError("Audio file not found", reason="audio_missing")
-        if not self.settings.openrouter_api_key:
-            raise TranscriptionProviderError("auth")
         if translate_to_english:
             raise TranscriptionError("Audio translation is not supported", reason="translation_unsupported")
+        # Try local Parakeet/faster-whisper first (no API key, no OpenRouter).
+        local = await self._try_local_transcription(audio_path, language)
+        if local is not None:
+            return local
+        if not get_provider_key(self.settings):
+            # No remote key and no local STT: let the pipeline use visual-only planning.
+            raise TranscriptionProviderError("auth")
         duration = await asyncio.to_thread(self._audio_duration, audio_path)
         segments: list[TranscriptSegment] = []
         costs = TranscriptionApiCosts(model="")
@@ -724,22 +801,20 @@ class TranscriptionService:
             "response_format": "verbose_json", "timestamp_granularities": ["segment", "word"],
         }
         phrases = normalize_keyterms(keyterms)
-        if model == TRANSCRIPTION_MODEL:
-            azure: dict = {"diarization": {"enabled": self.settings.transcription_diarize}}
-            if phrases:
-                azure["phraseList"] = {"phrases": phrases}
-            payload["provider"] = {"options": {"azure": azure}}
-        elif phrases and model in (BUDGET_TRANSCRIPTION_MODEL, BUDGET_FALLBACK_MODEL, "openai/whisper-1"):
-            # Groq accepts a prompt hint for Whisper. Other providers may
-            # ignore this option; word timings remain required either way.
-            payload["provider"] = {"options": {"groq": {"prompt": "Expected vocabulary: " + ", ".join(phrases)}}}
+        if phrases and model in (BUDGET_TRANSCRIPTION_MODEL, BUDGET_FALLBACK_MODEL, "openai/whisper-1"):
+            # Provider hint for Whisper-compatible endpoints; ignored elsewhere.
+            payload["provider"] = {"options": {"prompt": "Expected vocabulary: " + ", ".join(phrases)}}
         if language and language != "auto":
             payload["language"] = language
+        base = getattr(self.settings, "opencode_base_url", "https://opencode.ai/zen/go/v1").rstrip("/")
+        # OpenCode Go has no /audio/transcriptions; legacy OpenRouter-compatible
+        # bases still work via the same path. The URL is configurable via OPENCODE_BASE_URL.
+        url = f"{base}/audio/transcriptions"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=False) as client:
                 async with client.stream(
-                    "POST", "https://openrouter.ai/api/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {self.settings.openrouter_api_key}", "Accept-Encoding": "identity"}, json=payload,
+                    "POST", url,
+                    headers={"Authorization": f"Bearer {get_provider_key(self.settings) or ''}", "Accept-Encoding": "identity"}, json=payload,
                 ) as response:
                     if response.status_code != 200:
                         raise _provider_failure(response.status_code, response.headers.get("Retry-After"))

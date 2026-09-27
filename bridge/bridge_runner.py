@@ -55,29 +55,29 @@ FAILURES = (
      "There is not enough free disk space to finish this video.",
      "Free space on your startup disk and the output drive, then retry. Source videos can use several GB while clipping."),
     (("transcription authentication failed",),
-     "OpenRouter rejected the transcription request.",
-     "Check the OpenRouter API key in Settings."),
+     "OpenCode Go rejected the transcription request.",
+     "Check the OpenCode Go API key in Settings."),
     (("transcription providers are temporarily rate limited",),
      "Transcription providers are busy after automatic recovery attempts.",
-     "Wait a few minutes, then run again. If this persists, check the OpenRouter account's rate limits."),
+     "Wait a few minutes, then run again. If this persists, check the OpenCode Go account's rate limits."),
     (("transcription account credit limit reached",),
-     "OpenRouter could not transcribe the video because the account has insufficient credit or a spending limit.",
-     "Check the OpenRouter balance and API key spending limit, then run again."),
+     "OpenCode Go could not transcribe the video because the account has insufficient credit or a spending limit.",
+     "Check the OpenCode Go balance and API key spending limit, then run again."),
     (("transcription quota or rate limit reached",),
-     "OpenRouter could not transcribe the video because its quota or rate limit was reached.",
-     "Check the OpenRouter account, then retry later."),
+     "OpenCode Go could not transcribe the video because its quota or rate limit was reached.",
+     "Check the OpenCode Go account, then retry later."),
     (("transcription service unavailable",),
-     "OpenRouter could not be reached for transcription.",
-     "Check your connection and retry."),
+     "OpenCode Go could not be reached for transcription.",
+     "Check your connection and retry. Visual-only planning will be used when speech is unavailable."),
     (("transcription request rejected by provider",),
-     "OpenRouter rejected the transcription audio request.",
-     "The selected model may not support WAV audio and word timestamps. In Advanced mode, choose a timestamp-capable model such as Whisper Large V3 or MAI Transcribe 2."),
+     "OpenCode Go rejected the transcription audio request.",
+     "The selected model may not support WAV audio and word timestamps. Install local STT (pip install faster-whisper) for offline Parakeet-style transcription, or rely on visual-only planning."),
     (("transcription response lacked word timestamps",),
-     "OpenRouter returned a transcript without word timestamps.",
-     "Choose a transcription model with word timestamps in Advanced mode, such as Whisper Large V3 or MAI Transcribe 2, or retry using a preset."),
+     "Transcription returned a transcript without word timestamps.",
+     "Install local STT with word timestamps (faster-whisper), or retry using visual-only planning."),
     (("transcription response was invalid", "transcription response was too large"),
-     "OpenRouter returned an unusable transcription response.",
-     "Retry the run. If it persists, report this run so the provider response can be investigated."),
+     "OpenCode Go returned an unusable transcription response.",
+     "Retry the run. Visual-only planning will be used when speech is unavailable."),
     (("audio extraction failed", "audio duration could not be determined", "transcription audio preparation failed"),
      "BridgeClip could not prepare this video's audio for transcription.",
      "Run Settings → System check. If the tools are ready, report this run with its failure code."),
@@ -103,11 +103,11 @@ FAILURES = (
      "BridgeClip couldn't find any clips in this video.",
      "No clear spoken or visual moment met the selected clip length. If you set a start and end time, widen it or pick a shorter clip length."),
     (("out of credits", "quota exceeded"),
-     "Your OpenRouter key is out of credits.",
-     "Add credits at openrouter.ai/credits or raise the key's limit at openrouter.ai/keys."),
+     "Your OpenCode Go key is out of credits.",
+     "Add credits at opencode.ai/auth or check usage limits."),
     (("(401)", "status_code: 401", "unauthorized", "invalid api key", "invalid_api_key"),
      "An API key was rejected.",
-     "Check your OpenRouter key in Settings."),
+     "Check your OpenCode Go key in Settings."),
     (("timed out", "connection", "name resolution", "network is unreachable"),
      "A network request failed.",
      "Check your internet connection and retry."),
@@ -198,6 +198,10 @@ async def run(config: dict) -> bool:
         return False
 
     from clip_engine.config import get_settings, get_caption_preset
+    try:
+        from clip_engine.config import get_provider_key as _get_key
+    except ImportError:
+        _get_key = None
     from clip_engine.services.ai_clipping_pipeline import (
         AIClippingPipeline,
         ClippingJobRequest,
@@ -206,9 +210,13 @@ async def run(config: dict) -> bool:
 
     settings = get_settings()
 
+    if callable(_get_key):
+        api_key = _get_key(settings)
+    else:
+        api_key = (getattr(settings, "opencode_api_key", "") or getattr(settings, "openrouter_api_key", "") or "").strip() or None
     missing = []
-    if not settings.openrouter_api_key:
-        missing.append("OPENROUTER_API_KEY")
+    if not api_key:
+        missing.append("OPENCODE_API_KEY")
     if missing:
         emit({"type": "error", "message": f"Missing required API keys: {', '.join(missing)}"})
         return False

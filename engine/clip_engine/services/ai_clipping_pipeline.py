@@ -3,8 +3,8 @@ AI Clipping Pipeline - Orchestrator for the AI clipping workflow.
 
 Pipeline stages:
 1. Video download (YouTube via yt-dlp, S3, or direct URL)
-2. Audio extraction and transcription (MAI Transcribe 2 through OpenRouter)
-3. Intelligence planning (frontier LLM via OpenRouter)
+2. Audio extraction and transcription (local Parakeet-style STT; visual fallback)
+3. Intelligence planning (Muse Spark via OpenCode Go Responses API)
 4. Clip rendering (smart per-shot 9:16 framing with captions)
 5. S3 upload (parallel uploads)
 """
@@ -269,6 +269,12 @@ class AIClippingPipeline:
             except NoAudioTrackError:
                 logger.info("Source has no audio track; trying visual-only planning")
                 transcription_result = TranscriptionResult(segments=[], full_text="", provider="no_audio")
+                transcription_status = "no_speech"
+            except Exception as e:
+                # OpenCode Go has no remote STT; local Parakeet may be missing.
+                # Fall back to Muse visual-only planning instead of failing the job.
+                logger.warning("Transcription failed (%s); trying visual-only planning", e)
+                transcription_result = TranscriptionResult(segments=[], full_text="", provider="visual-fallback")
                 transcription_status = "no_speech"
             else:
                 if not transcription_result.segments:

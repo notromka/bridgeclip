@@ -160,9 +160,9 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     } catch (error) { return { error: error instanceof Error ? error.message : 'Invalid job options' } }
     const settings = loadSettings()
 
-    if (!settings.openrouterApiKey) {
-      logger.warn('job.start.missingKey', { key: 'OPENROUTER_API_KEY' })
-      return { error: 'OpenRouter API key is required for AI clip planning. Go to Settings to add it.' }
+    if (!(settings.opencodeApiKey || settings.openrouterApiKey)) {
+      logger.warn('job.start.missingKey', { key: 'OPENCODE_API_KEY' })
+      return { error: 'OpenCode Go API key is required for AI clip planning. Go to Settings to add it.' }
     }
 
     const enginePath = getEnginePath()

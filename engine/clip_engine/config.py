@@ -587,7 +587,9 @@ class Settings(BaseSettings):
     aws_secret_access_key: Optional[str] = None
     s3_bucket: str = "bridgeclip-media"
 
-    # API Keys (required)
+    # API Keys (required) - OpenCode Go (Muse Spark Contributor). OPENROUTER_API_KEY
+    # is accepted as a deprecated alias and migrated to OPENCODE_API_KEY.
+    opencode_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
 
     # Security - API authentication
@@ -637,26 +639,24 @@ class Settings(BaseSettings):
     # AI MODELS (override via env to swap models without a release)
     # ============================================================
 
-    # Clip planner (OpenRouter slugs). PLANNER_FALLBACK_MODELS is a
-    # comma-separated list OpenRouter tries in order if the primary errors,
-    # is rate limited, or is down. Defaults chosen 2026-09 from the Artificial
-    # Analysis Intelligence Index (v4.3) and a live A/B on a real transcript:
-    # Opus 5.5 @ medium was fastest (~11s) and the most discriminating scorer
-    # at ~$0.07 per 20 min of video. Fallbacks are cross-vendor. Every model in
-    # the chain must accept the configured reasoning effort.
-    planner_model: str = "anthropic/claude-opus-5.5"
-    planner_fallback_models: str = "google/gemini-3.8-flash,openai/gpt-6-sol"
+    # Clip planner (OpenCode Go model IDs). PLANNER_FALLBACK_MODELS is a
+    # comma-separated list tried in order if the primary errors,
+    # is rate limited, or is down. Defaults use Muse Spark Contributor
+    # via OpenCode Go Responses API (https://opencode.ai/zen/go/v1).
+    # Every model in the chain must accept the configured reasoning effort.
+    planner_model: str = "muse-spark-1.3-contributor"
+    planner_fallback_models: str = "muse-spark-1.2-contributor"
     # none | minimal | low | medium | high | xhigh
     planner_reasoning_effort: str = "medium"
     # Includes reasoning tokens; 100 clips of JSON is ~15k on its own.
     planner_max_output_tokens: int = 32000
 
     # Layout vision: classifies each shot's framing and locates webcam/screen
-    # overlays from one keyframe per distinct setup. Gemini 3.8 Flash has the
-    # best native box localization per dollar (AA MMMU-Pro 0.856, ~$0.001/frame).
+    # overlays from one keyframe per distinct setup. Muse Spark supports
+    # image input via the Responses API.
     layout_vision_enabled: bool = True
-    layout_vision_model: str = "google/gemini-3.8-flash"
-    layout_vision_fallback_models: str = "anthropic/claude-opus-5.5"
+    layout_vision_model: str = "muse-spark-1.3-contributor"
+    layout_vision_fallback_models: str = "muse-spark-1.2-contributor"
     layout_vision_reasoning_effort: str = "low"
 
     # Selected by the desktop bridge per process before settings are loaded.
@@ -796,10 +796,13 @@ class Settings(BaseSettings):
     def max_download_duration_seconds(self) -> int:
         return 21600  # 6 hours max (credit-guarded in API)
 
-    # Transcription uses the same OpenRouter key as planning.
+    # Transcription uses the same OpenCode Go key as planning when remote STT
+    # is used. OpenCode Go has no /audio/transcriptions endpoint, so the
+    # default path is local Parakeet-style STT (see transcription_service)
+    # with visual-only planning as fallback when no speech is available.
     @property
     def transcription_provider(self) -> str:
-        return "openrouter"
+        return "opencode"
 
     @property
     def transcription_model(self) -> str:
@@ -807,12 +810,32 @@ class Settings(BaseSettings):
             if not self.advanced_transcription_model:
                 raise ValueError("Choose a transcription model in Advanced mode")
             return self.advanced_transcription_model
-        return "openai/whisper-large-v3-turbo" if self.clipping_mode == "economy" else "microsoft/mai-transcribe-2"
+        return "parakeet-local"
 
-    # OpenRouter / LLM Configuration
+    @property
+    def effective_api_key(self) -> Optional[str]:
+        """Primary OpenCode Go key, falling back to legacy OpenRouter alias."""
+        key = (self.opencode_api_key or "").strip()
+        if key:
+            return key
+        legacy = (self.openrouter_api_key or "").strip()
+        return legacy or None
+
+    # OpenCode Go / LLM Configuration (https://opencode.ai/zen/go/v1).
+    # OPENCODE_BASE_URL overrides; OPENROUTER_BASE_URL kept as deprecated alias.
+    @property
+    def opencode_base_url(self) -> str:
+        override = (os.environ.get("OPENCODE_BASE_URL") or "").strip()
+        if override:
+            return override.rstrip("/")
+        legacy = (os.environ.get("OPENROUTER_BASE_URL") or "").strip()
+        if legacy:
+            return legacy.rstrip("/")
+        return "https://opencode.ai/zen/go/v1"
+
     @property
     def openrouter_base_url(self) -> str:
-        return "https://openrouter.ai/api/v1"
+        return self.opencode_base_url
 
     # Clip Planning Configuration
     @property
@@ -916,3 +939,22 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+
+def get_provider_key(settings) -> Optional[str]:
+    """OpenCode Go API key with legacy OpenRouter fallback."""
+    if settings is None:
+        return None
+    for attr in ("effective_api_key", "opencode_api_key", "openrouter_api_key"):
+        try:
+            value = getattr(settings, attr)
+        except Exception:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def is_muse_model(model: str) -> bool:
+    """Muse Spark Contributor models use the Responses API (not chat/completions)."""
+    return isinstance(model, str) and model.strip().lower().startswith("muse-spark-")

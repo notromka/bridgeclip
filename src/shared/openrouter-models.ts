@@ -18,7 +18,11 @@ export interface OpenRouterCatalog {
 }
 
 export function isModelId(value: unknown): value is string {
-  return typeof value === 'string' && value === value.trim() && value.length <= 120 && /^~?[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/i.test(value)
+  if (typeof value !== 'string' || value !== value.trim() || !value || value.length > 120) return false
+  // Legacy OpenRouter slash IDs (vendor/model) plus OpenCode Go IDs
+  // (muse-spark-1.3-contributor, kimi-k3, parakeet-local).
+  return /^~?[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/i.test(value) ||
+    /^[a-z0-9][a-z0-9._:-]*$/i.test(value)
 }
 
 export function searchModels(models: OpenRouterModel[], query: string): OpenRouterModel[] {

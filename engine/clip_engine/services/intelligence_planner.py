@@ -1,9 +1,10 @@
 """
-Intelligence Planner Service - Uses a frontier LLM via OpenRouter to plan viral clips.
+Intelligence Planner Service - Uses Muse Spark via OpenCode Go to plan viral clips.
 
 The model, its fallbacks and its reasoning effort come from settings
 (PLANNER_MODEL, PLANNER_FALLBACK_MODELS, PLANNER_REASONING_EFFORT) so models
-can be swapped per deployment without a code change.
+can be swapped per deployment without a code change. Muse Spark Contributor
+models use the Responses API; other OpenCode Go models use chat/completions.
 """
 
 import asyncio
@@ -20,7 +21,8 @@ from typing import Any, Literal, Optional
 
 import httpx
 
-from clip_engine.config import DURATION_RANGES, get_settings, is_longform, resolve_clip_duration_bounds
+from clip_engine.config import DURATION_RANGES, get_provider_key, get_settings, is_longform, is_muse_model, resolve_clip_duration_bounds
+from clip_engine.services.opencode import responses_completion
 from clip_engine.services.openrouter import (
     OpenRouterError,
     apply_reasoning,
@@ -67,9 +69,9 @@ class ClipPlanSegment:
 
 @dataclass
 class PlanningApiCosts:
-    """Cost tracking for OpenRouter API calls during clip planning."""
+    """Cost tracking for OpenCode Go API calls during clip planning."""
 
-    provider: str = "openrouter"
+    provider: str = "opencode"
     model: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -79,14 +81,11 @@ class PlanningApiCosts:
     cost_incomplete: bool = False
 
 
-# OpenRouter reports the billed cost of every request in `usage.cost`, which
-# is what we record. This per-token table is only used if that field is
-# missing, so it only needs to be roughly right.
+# OpenCode Go pricing per 1M tokens (Muse Spark Contributor: $0.10 in / $0.20 out).
 MODEL_PRICING: dict[str, dict[str, float]] = {
-    "anthropic/claude-opus-5.5": {"input": 4.00e-6, "output": 20.0e-6},
-    "z-ai/glm-5.3-flash": {"input": 0.075e-6, "output": 0.25e-6},
-    "google/gemini-3.8-flash": {"input": 0.75e-6, "output": 3.75e-6},
-    "openai/gpt-6-sol": {"input": 2.00e-6, "output": 10.0e-6},
+    "muse-spark-1.3-contributor": {"input": 0.10e-6, "output": 0.20e-6},
+    "muse-spark-1.2-contributor": {"input": 0.10e-6, "output": 0.20e-6},
+    "muse-spark-1.3": {"input": 1.25e-6, "output": 4.25e-6},
 }
 
 # Conservative fallback when model is unknown
@@ -227,9 +226,9 @@ class IntelligencePlannerService:
     def __init__(self):
         self.settings = get_settings()
         self._http_client: Optional[httpx.AsyncClient] = None
-        
-        if not self.settings.openrouter_api_key:
-            logger.warning("OPENROUTER_API_KEY not set, intelligence planning will fail")
+
+        if not get_provider_key(self.settings):
+            logger.warning("OPENCODE_API_KEY not set, intelligence planning will fail")
 
     def calculate_optimal_clip_count(
         self,
@@ -350,15 +349,15 @@ class IntelligencePlannerService:
         return 0.0, "fallback"
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
+        """Get or create HTTP client (OpenCode Go)."""
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(
-                base_url=self.settings.openrouter_base_url,
+                base_url=self.settings.opencode_base_url,
                 # Reasoning over a multi-hour transcript can take minutes.
                 timeout=httpx.Timeout(600.0, connect=30.0),
                 headers={
-                    "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-                    "HTTP-Referer": "https://github.com/bridge-mind/bridgeclip",
+                    "Authorization": f"Bearer {get_provider_key(self.settings) or ''}",
+                    "HTTP-Referer": "https://github.com/notromka/bridgeclip",
                     "X-Title": "BridgeClip AI Clipping Agent",
                 },
             )
@@ -580,16 +579,20 @@ class IntelligencePlannerService:
         cost_incomplete = False
         attempts_made = 0
         served_by = model_name
+        # Client-side fallback chain (OpenCode Go has no server-side `models` field).
+        candidate_models = [model_name, *[m for m in fallback_models if m != model_name]]
 
         for attempt in range(max_attempts):
             attempts_made += 1
+            # Rotate through candidates on retryable failures.
+            current_model = candidate_models[min(attempt, len(candidate_models) - 1)]
             try:
                 response, usage_data = await self._call_openrouter(
-                    model=model_name,
-                    fallback_models=fallback_models,
+                    model=current_model,
+                    fallback_models=[],
                     messages=messages,
                 )
-                served_by = response.get("model") or model_name
+                served_by = response.get("model") or current_model
                 cumulative_prompt_tokens += usage_data["prompt_tokens"]
                 cumulative_completion_tokens += usage_data["completion_tokens"]
                 cumulative_total_tokens += usage_data["total_tokens"]
@@ -628,7 +631,7 @@ class IntelligencePlannerService:
             result.segments = self._finalize_clips(result.segments, clip_count)
             result.total_clips = len(result.segments)
             result.api_costs = PlanningApiCosts(
-                provider="openrouter",
+                provider="opencode",
                 model=served_by,
                 prompt_tokens=cumulative_prompt_tokens,
                 completion_tokens=cumulative_completion_tokens,
@@ -640,7 +643,7 @@ class IntelligencePlannerService:
             logger.info(
                 f"Planning API cost: ${cumulative_cost:.6f} "
                 f"({cumulative_total_tokens} tokens, {attempts_made} attempt(s), "
-                f"model={served_by}, source={'openrouter' if cost_reported else 'estimate'})"
+                f"model={served_by}, source={'opencode' if cost_reported else 'estimate'})"
             )
             return result
 
@@ -972,7 +975,7 @@ Do not overlap clips by more than 5 seconds."""
         fallback_models: list[str],
         messages: list[dict],
     ) -> dict:
-        """Build the OpenRouter chat payload for a clip-planning request."""
+        """Build the OpenCode Go chat payload for a clip-planning request."""
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -980,14 +983,9 @@ Do not overlap clips by more than 5 seconds."""
             "response_format": json_schema_format(
                 "clip_plan", clip_plan_schema(getattr(self, "_current_longform", False)),
             ),
-            # Repairs near-miss JSON (trailing commas, stray fences) server-side.
-            "plugins": [{"id": "response-healing"}],
-            # Only route to endpoints that honour every parameter above, so a
-            # provider can't silently drop the schema or reasoning settings.
-            "provider": {"require_parameters": True},
         }
-        if fallback_models:
-            payload["models"] = fallback_models
+        # OpenCode Go does not support OpenRouter's `models` fallback or
+        # `provider` routing plugins; fallbacks are tried client-side.
 
         # Advanced accepts models without configurable reasoning. Let the
         # selected model use its defaults instead of requiring a preset effort.
@@ -1001,13 +999,31 @@ Do not overlap clips by more than 5 seconds."""
         messages: list[dict],
         fallback_models: Optional[list[str]] = None,
     ) -> tuple[dict, dict]:
-        """Call OpenRouter chat completions (see clip_engine.services.openrouter).
+        """Call OpenCode Go (Responses API for Muse, chat/completions otherwise).
 
         Raises:
             IntelligencePlanningError: with `retryable=True` for rate limits,
             provider outages and network failures.
         """
         client = await self._get_client()
+        # Muse Spark Contributor models are Responses-only.
+        if is_muse_model(model):
+            from clip_engine.services.opencode import OpenCodeError
+
+            # CLIP_PLAN_SCHEMA is defined below; import at call time to avoid order issues.
+            schema = globals().get("CLIP_PLAN_SCHEMA") or globals().get("CLIP_PLAN_SCHEMA", None)
+            try:
+                return await responses_completion(
+                    client,
+                    model=model,
+                    messages=messages,
+                    max_output_tokens=self.settings.planner_max_output_tokens,
+                    reasoning_effort=self.settings.planner_reasoning_effort,
+                    json_schema=schema,
+                    schema_name="clip_plan",
+                )
+            except OpenCodeError as e:
+                raise IntelligencePlanningError(str(e), retryable=e.retryable) from e
         payload = self._build_request_payload(model, fallback_models or [], messages)
         try:
             return await chat_completion(client, payload)
@@ -1015,7 +1031,7 @@ Do not overlap clips by more than 5 seconds."""
             raise IntelligencePlanningError(str(e), retryable=e.retryable) from e
 
     def _parse_clip_plan_response(self, response: dict) -> ClipPlanResponse:
-        """Parse OpenRouter response into ClipPlanResponse."""
+        """Parse OpenCode Go response into ClipPlanResponse."""
         try:
             content, finish_reason = message_text(response)
             if not content:

@@ -32,8 +32,9 @@ from typing import Any, Optional
 
 import httpx
 
-from clip_engine.config import LayoutStyle, get_settings
+from clip_engine.config import LayoutStyle, get_provider_key, get_settings, is_muse_model
 from clip_engine.services.media_process import media_process, MediaProcessError, validate_video_dimensions
+from clip_engine.services.opencode import responses_completion
 from clip_engine.services.openrouter import (
     OpenRouterError,
     apply_reasoning,
@@ -951,7 +952,7 @@ class LayoutAnalyzer:
     # -- vision ---------------------------------------------------------------
 
     def _vision_enabled(self) -> bool:
-        return bool(self.settings.layout_vision_enabled and self.settings.openrouter_api_key)
+        return bool(self.settings.layout_vision_enabled and get_provider_key(self.settings))
 
     async def _vision_classify(
         self, keyframe: bytes, shot_frames: list[FrameInfo], heuristic: ShotLayout,
@@ -969,9 +970,8 @@ class LayoutAnalyzer:
         faces = sorted(
             {tuple(round(v, 3) for v in b.to_list()) for f in shot_frames[:: max(1, len(shot_frames) // 4)] for b in f.faces}
         )[:6]
-        payload: dict[str, Any] = {
-            "model": self.settings.layout_vision_model,
-            "messages": [{
+        model = self.settings.layout_vision_model
+        messages = [{
                 "role": "user",
                 "content": [
                     {"type": "text", "text": VISION_PROMPT.replace("{faces}", json.dumps(faces) or "[]")},
@@ -979,26 +979,39 @@ class LayoutAnalyzer:
                         "url": "data:image/jpeg;base64," + base64.b64encode(keyframe).decode(),
                     }},
                 ],
-            }],
+            }]
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
             "max_tokens": 4000,
             "response_format": json_schema_format("frame_layout", VISION_SCHEMA),
-            "provider": {"require_parameters": True},
         }
-        fallbacks = self.settings.get_layout_vision_fallback_models()
-        if fallbacks:
-            payload["models"] = fallbacks
         apply_reasoning(payload, self.settings.layout_vision_reasoning_effort, temperature=0.0)
 
         client = await self._get_client()
         for attempt in range(2):
             try:
-                body, usage = await chat_completion(client, payload)
+                if is_muse_model(model):
+                    from clip_engine.services.opencode import OpenCodeError
+
+                    body, usage = await responses_completion(
+                        client,
+                        model=model,
+                        messages=messages,
+                        max_output_tokens=4000,
+                        reasoning_effort=self.settings.layout_vision_reasoning_effort,
+                        json_schema=VISION_SCHEMA,
+                        schema_name="frame_layout",
+                    )
+                else:
+                    body, usage = await chat_completion(client, payload)
                 content, _ = message_text(body)
                 result = json.loads(content or "")
                 self._vision_cache.append((hist, signature, result))
                 return result, usage.get("cost") or 0.0
-            except OpenRouterError as e:
-                if not e.retryable or attempt == 1:
+            except (OpenRouterError, Exception) as e:
+                retryable = getattr(e, "retryable", False)
+                if not retryable or attempt == 1:
                     logger.warning(f"Layout vision failed, using heuristics: {e}")
                     return None, 0.0
                 await asyncio.sleep(1.5)
@@ -1010,11 +1023,11 @@ class LayoutAnalyzer:
     async def _get_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(
-                base_url=self.settings.openrouter_base_url,
+                base_url=self.settings.opencode_base_url,
                 timeout=httpx.Timeout(120.0, connect=20.0),
                 headers={
-                    "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-                    "HTTP-Referer": "https://github.com/bridge-mind/bridgeclip",
+                    "Authorization": f"Bearer {get_provider_key(self.settings) or ''}",
+                    "HTTP-Referer": "https://github.com/notromka/bridgeclip",
                     "X-Title": "BridgeClip AI Clipping Agent",
                 },
             )

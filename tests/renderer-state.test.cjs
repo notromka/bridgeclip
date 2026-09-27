@@ -30,7 +30,7 @@ function deferred() {
 }
 
 const settings = {
-  openrouterConfigured: false, outputDirectory: '/clips',
+  opencodeConfigured: false, openrouterConfigured: false, outputDirectory: '/clips',
   pythonPath: 'python3', 
 }
 
@@ -147,21 +147,21 @@ test('API key changes share the settings queue and keep the saving indicator act
     replaceApiKey: async (key) => {
       calls.push(key)
       await keyWrite.promise
-      return { ...settings, outputDirectory: '/new-clips', openrouterConfigured: true }
+      return { ...settings, outputDirectory: '/new-clips', opencodeConfigured: true, openrouterConfigured: true }
     }
   } })
   await useSettingsStore.getState().load()
   const folder = useSettingsStore.getState().save({ outputDirectory: '/new-clips' })
-  const key = useSettingsStore.getState().replaceApiKey('openrouterApiKey', 'test-key')
+  const key = useSettingsStore.getState().replaceApiKey('opencodeApiKey', 'test-key')
   await Promise.resolve()
   assert.deepEqual(calls, ['settings'])
   first.resolve()
   await folder
-  assert.deepEqual(calls, ['settings', 'openrouterApiKey'])
+  assert.deepEqual(calls, ['settings', 'opencodeApiKey'])
   assert.equal(useSettingsStore.getState().saving, true)
   keyWrite.resolve()
   await key
-  assert.equal(useSettingsStore.getState().openrouterConfigured, true)
+  assert.equal(useSettingsStore.getState().opencodeConfigured, true)
   assert.equal(useSettingsStore.getState().saving, false)
 })
 
@@ -242,7 +242,7 @@ test('clip results retain bounded framing, pacing, and complete cost metrics', (
           layout: 'screen_cam', source: 'vision', cam_box: [0.5, 0.5, 0.4, 0.4],
           screen_box: [0, 0, 1, 1], secret: 'ignored' }] }],
       api_costs: { total_estimated_cost_usd: 0.04,
-        planning: { provider: 'openrouter', model: 'example', prompt_tokens: 100,
+        planning: { provider: 'opencode', model: 'example', prompt_tokens: 100,
           completion_tokens: 20, total_tokens: 120, attempts: 1, estimated_cost_usd: 0.03, secret: 'ignored' } },
       secret: 'ignored'
     }

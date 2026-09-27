@@ -13,7 +13,8 @@ import { readResponseText } from './http-response'
 const execFileAsync = promisify(execFile)
 type Platform = (typeof AUTOMATION_PLATFORMS)[number]
 const CATEGORY_IDS = new Set(['1', '10', '20', '22', '24', '27', '28'])
-const MODEL = 'openai/gpt-4.1-mini'
+const MODEL = 'muse-spark-1.3-contributor'
+const OPENCODE_GO_BASE = (process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/go/v1').replace(/\/$/, '')
 const MAX_TRANSCRIPT = 20_000
 export interface MetadataContext { facebookFormat?: FacebookFormat }
 
@@ -36,28 +37,48 @@ function endpoint(name: 'BRIDGECLIP_E2E_TRANSCRIPTION_URL' | 'BRIDGECLIP_E2E_OPE
   return app.isPackaged ? production : process.env[name] || production
 }
 
+const OPENCODE_RESPONSES_URL = `${OPENCODE_GO_BASE}/responses`
+
 async function providerResponse(response: Response, operation: 'transcription' | 'metadata', maxBytes = 100_000): Promise<Record<string, unknown>> {
   if (!response.ok) {
     const status = response.status
-    if (status === 401 || status === 403) throw new Error('OpenRouter rejected the API key. Check it in Settings.')
-    if (status === 402) throw new Error('OpenRouter reports insufficient credits. Check your OpenRouter account.')
-    if (status === 429) throw new Error('OpenRouter is rate limiting requests. Try again shortly.')
-    if (status === 400) throw new Error(`OpenRouter rejected the ${operation} request (400). ${operation === 'transcription' ? 'The clip audio or request format may be unsupported.' : 'Try again or use manual metadata.'}`)
-    throw new Error(`OpenRouter ${operation} failed (${status}). Try again later.`)
+    if (status === 401 || status === 403) throw new Error('OpenCode Go rejected the API key. Check it in Settings.')
+    if (status === 402) throw new Error('OpenCode Go reports insufficient credits. Check your OpenCode Go account.')
+    if (status === 429) throw new Error('OpenCode Go is rate limiting requests. Try again shortly.')
+    if (status === 400) throw new Error(`OpenCode Go rejected the ${operation} request (400). ${operation === 'transcription' ? 'Local transcription will be used when available; otherwise visual-only planning applies.' : 'Try again or use manual metadata.'}`)
+    throw new Error(`OpenCode Go ${operation} failed (${status}). Try again later.`)
   }
-  const raw = await readResponseText(response, maxBytes, 'OpenRouter returned too much metadata.')
+  const raw = await readResponseText(response, maxBytes, 'OpenCode Go returned too much metadata.')
   try {
     const parsed: unknown = JSON.parse(raw)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
   } catch { /* Safe fixed error below. */ }
-  throw new Error('OpenRouter returned an invalid response. Try again.')
+  throw new Error('OpenCode Go returned an invalid response. Try again.')
 }
 
-/** Use the same OpenRouter account for speech recognition and metadata writing. */
+/** Extract text from a Responses API body (Muse) or chat/completions body. */
+function extractModelText(body: Record<string, unknown>): string | null {
+  const output = (body as { output?: Array<{ content?: Array<{ type?: string; text?: unknown }> }> }).output
+  if (Array.isArray(output)) {
+    let text = ''
+    for (const item of output) {
+      for (const part of item.content || []) {
+        if (part.type === 'output_text' && typeof part.text === 'string') text += part.text
+        else if (part.type === 'text' && typeof part.text === 'string') text += part.text
+      }
+    }
+    if (text) return text
+  }
+  const choices = (body as { choices?: Array<{ message?: { content?: unknown } }> }).choices
+  const content = Array.isArray(choices) ? choices[0]?.message?.content : null
+  return typeof content === 'string' ? content : null
+}
+
+/** Use the same OpenCode Go account for speech recognition and metadata writing. */
 export async function transcribeAutomationClip(path: string): Promise<string> {
   const settings = loadSettings()
-  const key = settings.openrouterApiKey
-  if (!key) throw new Error('Add an OpenRouter API key in Settings to transcribe automation clips.')
+  const key = settings.opencodeApiKey || settings.openrouterApiKey
+  if (!key) throw new Error('Add an OpenCode Go API key in Settings to transcribe automation clips.')
   const directory = await mkdtemp(join(tmpdir(), 'bridgeclip-transcript-'))
   try {
     // Bound each request rather than sending an entire long recording to STT.
@@ -72,32 +93,11 @@ export async function transcribeAutomationClip(path: string): Promise<string> {
     let totalBytes = 0
     for (const file of files) totalBytes += (await stat(join(directory, file))).size
     if (totalBytes > 50 * 1024 * 1024) throw new Error('The clip audio is too long for automatic metadata. Use manual metadata.')
-    const phrases = vocabularyTerms(settings.customVocabulary)
-    let transcript = ''
-    for (const file of files) {
-      const bytes = await readFile(join(directory, file))
-      const result = await providerResponse(await fetch(endpoint('BRIDGECLIP_E2E_TRANSCRIPTION_URL', 'https://openrouter.ai/api/v1/audio/transcriptions'), {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'microsoft/mai-transcribe-2', input_audio: { data: bytes.toString('base64'), format: 'wav' },
-          response_format: 'verbose_json',
-          ...(phrases.length ? { provider: { options: { azure: { phraseList: { phrases } } } } } : {})
-        }),
-        redirect: 'error', signal: AbortSignal.timeout(90_000)
-      }), 'transcription', 2_000_000)
-      if (typeof result.text !== 'string') throw new Error('OpenRouter returned an invalid transcript. Try again.')
-      const text = [...result.text].map((character) => {
-        const code = character.charCodeAt(0)
-        return code <= 31 || code === 127 ? ' ' : character
-      }).join('').replace(/\s+/g, ' ').trim()
-      transcript = [transcript, text].filter(Boolean).join(' ')
-      if (transcript.length > MAX_TRANSCRIPT) throw new Error('This clip’s transcript is too long for automatic metadata. Use manual metadata.')
-    }
-    if (!transcript) throw new Error('No speech was detected in this clip. Use manual metadata for silent clips.')
-    return transcript
+    // OpenCode Go has no audio/transcriptions endpoint: automation clips
+    // require local STT. Fail fast with a clear message instead of 404.
+    throw new Error('Automation transcription needs local STT (pip install faster-whisper) because OpenCode Go has no speech endpoint. Use manual metadata for now.')
   } catch (error) {
-    if (error instanceof Error && /OpenRouter|No speech|transcript is too long|audio is too long/.test(error.message)) throw error
+    if (error instanceof Error && /OpenCode Go|local STT|No speech|transcript is too long|audio is too long/.test(error.message)) throw error
     throw new Error('The clip audio could not be transcribed. Check that it has a playable audio track and try again.')
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
@@ -165,8 +165,8 @@ export function parseGeneratedMetadata(value: unknown, platforms: readonly Platf
 
 export async function generateAutomationMetadata(transcript: string, title: string, notes: string, platforms: readonly Platform[], context: MetadataContext = {}): Promise<GeneratedPlatformMetadata[]> {
   const settings = loadSettings()
-  const key = settings.openrouterApiKey
-  if (!key) throw new Error('Add an OpenRouter API key in Settings to generate automation metadata.')
+  const key = settings.opencodeApiKey || settings.openrouterApiKey
+  if (!key) throw new Error('Add an OpenCode Go API key in Settings to generate automation metadata.')
   const vocabulary = vocabularyTerms(settings.customVocabulary)
   const names = [...new Set(platforms)]
   const schema = {
@@ -194,25 +194,26 @@ export async function generateAutomationMetadata(transcript: string, title: stri
   let validationFeedback: string | null = null
   for (let attempt = 0; attempt < 2; attempt++) {
     let response: Record<string, unknown>
-    try { response = await providerResponse(await fetch(endpoint('BRIDGECLIP_E2E_OPENROUTER_URL', 'https://openrouter.ai/api/v1/chat/completions'), {
-      method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://github.com/bridge-mind/bridgeclip', 'X-Title': 'BridgeClip' },
+    try { response = await providerResponse(await fetch(endpoint('BRIDGECLIP_E2E_OPENROUTER_URL', OPENCODE_RESPONSES_URL), {
+      method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://github.com/notromka/bridgeclip', 'X-Title': 'BridgeClip', 'User-Agent': 'BridgeClip/0.1.18 (opencode-go)' },
       redirect: 'error',
       signal: AbortSignal.timeout(120_000),
-      body: JSON.stringify({ model: MODEL, messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: JSON.stringify(input) },
-        ...(validationFeedback ? [{ role: 'user', content: `Regenerate all posts. The previous result failed validation: ${validationFeedback} Check every platform's required fields and caption rules. Copy each evidence phrase as a contiguous excerpt of the transcript. Remove any claim that cannot be supported by that excerpt. Use a Threads topic only when it appears verbatim in the transcript.` }] : [])
-      ], response_format: { type: 'json_schema', json_schema: { name: 'automation_metadata', strict: true, schema } }, provider: { require_parameters: true }, max_tokens: 4000 })
+      body: JSON.stringify({ model: MODEL, store: false, max_output_tokens: 4000,
+        input: [
+          { role: 'system', content: [{ type: 'input_text', text: systemPrompt }] },
+          { role: 'user', content: [{ type: 'input_text', text: JSON.stringify(input) }] },
+          ...(validationFeedback ? [{ role: 'user', content: [{ type: 'input_text', text: `Regenerate all posts. The previous result failed validation: ${validationFeedback} Check every platform's required fields and caption rules. Copy each evidence phrase as a contiguous excerpt of the transcript. Remove any claim that cannot be supported by that excerpt. Use a Threads topic only when it appears verbatim in the transcript.` }] }] : [])
+        ],
+        text: { format: { type: 'json_schema', name: 'automation_metadata', strict: true, schema } } })
     }), 'metadata') } catch (error) {
-      if (error instanceof Error && error.message.startsWith('OpenRouter')) throw error
-      throw new Error('OpenRouter could not be reached. The clip was not posted; try again later.')
+      if (error instanceof Error && error.message.startsWith('OpenCode Go')) throw error
+      throw new Error('OpenCode Go could not be reached. The clip was not posted; try again later.')
     }
-    const choices = response.choices
-    const content = Array.isArray(choices) ? (choices[0] as { message?: { content?: unknown } })?.message?.content : null
-    if (typeof content !== 'string') throw new Error('OpenRouter returned no metadata. The clip was not posted.')
+    const content = extractModelText(response)
+    if (typeof content !== 'string') throw new Error('OpenCode Go returned no metadata. The clip was not posted.')
     try { return parseGeneratedMetadata(JSON.parse(content), names, transcript, context) }
     catch (error) {
-      if (error instanceof SyntaxError) throw new Error('OpenRouter returned invalid metadata JSON. The clip was not posted.')
+      if (error instanceof SyntaxError) throw new Error('OpenCode Go returned invalid metadata JSON. The clip was not posted.')
       if (attempt === 0 && error instanceof Error && /^AI(?: metadata|-generated)/.test(error.message)) {
         validationFeedback = error.message
         continue

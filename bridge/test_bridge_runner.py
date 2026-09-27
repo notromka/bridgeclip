@@ -43,7 +43,7 @@ class BridgeTests(unittest.TestCase):
             )
         self.assertEqual(done.returncode, 1, done.stderr)
         messages = [json.loads(line) for line in done.stdout.splitlines()]
-        self.assertEqual(messages, [{"type": "error", "message": "Missing required API keys: OPENROUTER_API_KEY"}])
+        self.assertEqual(messages, [{"type": "error", "message": "Missing required API keys: OPENCODE_API_KEY"}])
 
     def test_openrouter_key_alone_starts_the_pipeline(self):
         from dataclasses import make_dataclass
@@ -198,12 +198,12 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.describe_failure(None)["message"], "The clipping pipeline failed.")
         empty = bridge.describe_failure("No clip-worthy moments found (the video may have no speech, or the selected time range is too short for the chosen clip length)")
         self.assertEqual(empty["message"], "BridgeClip couldn't find any clips in this video.")
-        self.assertEqual(bridge.describe_failure("Transcription authentication failed")["message"], "OpenRouter rejected the transcription request.")
-        self.assertEqual(bridge.describe_failure("Transcription account credit limit reached")["message"], "OpenRouter could not transcribe the video because the account has insufficient credit or a spending limit.")
+        self.assertEqual(bridge.describe_failure("Transcription authentication failed")["message"], "OpenCode Go rejected the transcription request.")
+        self.assertEqual(bridge.describe_failure("Transcription account credit limit reached")["message"], "OpenCode Go could not transcribe the video because the account has insufficient credit or a spending limit.")
         self.assertEqual(bridge.describe_failure("Transcription providers are temporarily rate limited")["message"], "Transcription providers are busy after automatic recovery attempts.")
-        self.assertEqual(bridge.describe_failure("Transcription service unavailable")["message"], "OpenRouter could not be reached for transcription.")
-        self.assertEqual(bridge.describe_failure("Transcription request rejected by provider")["message"], "OpenRouter rejected the transcription audio request.")
-        self.assertEqual(bridge.describe_failure("Transcription response lacked word timestamps")["message"], "OpenRouter returned a transcript without word timestamps.")
+        self.assertEqual(bridge.describe_failure("Transcription service unavailable")["message"], "OpenCode Go could not be reached for transcription.")
+        self.assertEqual(bridge.describe_failure("Transcription request rejected by provider")["message"], "OpenCode Go rejected the transcription audio request.")
+        self.assertEqual(bridge.describe_failure("Transcription response lacked word timestamps")["message"], "Transcription returned a transcript without word timestamps.")
         self.assertEqual(bridge.describe_failure("Video render failed")["message"], "Clip rendering failed.")
         self.assertEqual(bridge.describe_failure("Not enough disk space to save clips")["message"],
                          "There is not enough free disk space to finish this video.")

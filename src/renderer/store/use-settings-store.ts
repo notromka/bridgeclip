@@ -11,7 +11,7 @@ interface SettingsState extends ClipSettings {
   toolError: string | null
   load: () => Promise<void>
   save: (settings: Partial<ClipSettings>) => Promise<void>
-  replaceApiKey: (key: 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<void>
+  replaceApiKey: (key: 'opencodeApiKey' | 'openrouterApiKey' | 'zernioApiKey', value: string) => Promise<void>
   checkTools: () => Promise<void>
 }
 
@@ -21,6 +21,7 @@ let pendingSaves = 0
 let latestToolCheck = 0
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
+  opencodeConfigured: false,
   openrouterConfigured: false,
   zernioConfigured: false,
   outputDirectory: '',
@@ -85,6 +86,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
 function pickSettings(s: ClipSettings): ClipSettings {
   return {
+    opencodeConfigured: (s as ClipSettings).opencodeConfigured ?? s.openrouterConfigured,
     openrouterConfigured: s.openrouterConfigured,
     zernioConfigured: s.zernioConfigured,
     outputDirectory: s.outputDirectory,
@@ -95,14 +97,14 @@ function pickSettings(s: ClipSettings): ClipSettings {
 
 export type SetupState = { ready: boolean; missingKeys: string[]; toolsOk: boolean | null }
 
-/** Whether a clip job can start: the OpenRouter key is present and, once the
+/** Whether a clip job can start: the OpenCode Go key is present and, once the
  *  system check has run, every required tool found. */
 export function useSetupState(): SetupState {
-  const openrouter = useSettingsStore((s) => s.openrouterConfigured)
+  const opencode = useSettingsStore((s) => s.opencodeConfigured || s.openrouterConfigured)
   const tools = useSettingsStore((s) => s.toolStatus)
   const toolError = useSettingsStore((s) => s.toolError)
   const checkingTools = useSettingsStore((s) => s.checkingTools)
-  const missingKeys = [!openrouter && 'OpenRouter'].filter(Boolean) as string[]
+  const missingKeys = [!opencode && 'OpenCode Go'].filter(Boolean) as string[]
   const toolsOk = toolError ? false : tools
     ? tools.python && tools.pythonDeps && tools.ffmpeg && tools.ffprobe && tools.ytdlp && tools.engine && tools.bridgeRunner
     : null

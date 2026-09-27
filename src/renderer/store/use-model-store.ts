@@ -21,7 +21,7 @@ export const useModelStore = create<ModelState>((set, get) => ({
       const catalog = await getApi().models.list(refresh)
       set({ catalog, loading: false })
     } catch {
-      set({ loading: false, error: 'Could not load OpenRouter models. Check your connection, then refresh.' })
+      set({ loading: false, error: 'Could not load OpenCode Go models. Check your connection, then refresh.' })
     }
   }
 }))

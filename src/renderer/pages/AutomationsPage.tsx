@@ -76,7 +76,7 @@ const LIST_FORMAT = new Intl.ListFormat('en', { style: 'long', type: 'conjunctio
 
 export function AutomationsPage({ onNavigate }: { onNavigate: (page: PageName) => void }): React.JSX.Element {
   const configured = useSettingsStore((state) => state.zernioConfigured)
-  const writingConfigured = useSettingsStore((state) => state.openrouterConfigured)
+  const writingConfigured = useSettingsStore((state) => state.opencodeConfigured || state.openrouterConfigured)
   const { accounts, profiles, hydrate, load: loadAccounts, loading: accountsLoading, setProfile, createProfile } = useAccountsStore()
   const [automations, setAutomations] = useState<Automation[]>([])
   const [loaded, setLoaded] = useState(false)

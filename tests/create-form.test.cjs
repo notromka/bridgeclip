@@ -31,13 +31,13 @@ const form = { exports: {} }
 new Function('module', 'exports', 'require', bundled)(form, form.exports, require)
 const { FormatStep, JobForm, isValidSourceLink, parseTrimRange, framingProblem, sourceAnalysisNotice, parseJobOutput } = form.exports
 
-test('setup needs only OpenRouter for clipping', () => {
+test('setup needs only OpenCode Go for clipping', () => {
   const { SetupCard, useSettingsStore } = form.exports
-  useSettingsStore.setState({ openrouterConfigured: false })
+  useSettingsStore.setState({ opencodeConfigured: false, openrouterConfigured: false })
   const setup = renderToStaticMarkup(React.createElement(SetupCard, { onOpenSettings() {} }))
-  assert.match(setup, /OpenRouter/)
+  assert.match(setup, /OpenCode Go/)
   assert.doesNotMatch(setup, /ElevenLabs/)
-  useSettingsStore.setState({ openrouterConfigured: false, toolStatus: null })
+  useSettingsStore.setState({ opencodeConfigured: false, openrouterConfigured: false, toolStatus: null })
 })
 
 test('source picker accepts full HTTP(S) links and rejects malformed or credentialed links', () => {

@@ -8,8 +8,8 @@ import { Button } from './ui/Button'
 import { IconTile } from './ui/IconTile'
 
 /**
- * First-run setup, inline on the Create page: paste the OpenRouter key here instead of
- * being sent to Settings. Hidden once the OpenRouter key exists and the tools check out.
+ * First-run setup, inline on the Create page: paste the OpenCode Go key here instead of
+ * being sent to Settings. Hidden once the OpenCode Go key exists and the tools check out.
  */
 export function SetupCard({ onOpenSettings, className }: { onOpenSettings: () => void; className?: string }): React.JSX.Element | null {
   const { missingKeys, toolsOk } = useSetupState()
@@ -44,20 +44,20 @@ export function SetupCard({ onOpenSettings, className }: { onOpenSettings: () =>
           </IconTile>
           <div className="min-w-0">
             <p className="eyebrow text-accent-hover">One-time setup</p>
-            <h2 className="mt-0.5 text-base font-semibold text-ink">Connect OpenRouter</h2>
+            <h2 className="mt-0.5 text-base font-semibold text-ink">Connect OpenCode Go</h2>
             <p className="mt-0.5 max-w-2xl text-xs text-ink-muted">
-              BridgeClip has no account and no server. One OpenRouter key covers transcription with MAI Transcribe 2 and clip selection.
+              BridgeClip has no account and no server. One OpenCode Go key covers Muse Spark clip planning (local Parakeet STT for transcription, visual fallback when silent).
             </p>
           </div>
         </div>
         <div className="relative m-3 grid gap-3 rounded-xl bg-black/15 p-3 shadow-[inset_0_0_0_1px_rgb(255_255_255/0.06)]">
           <ApiKeyInput
-            label="OpenRouter"
-            value={drafts.openrouterApiKey}
-            onChange={(v) => setDraft('openrouterApiKey', v)}
+            label="OpenCode Go"
+            value={drafts.opencodeApiKey}
+            onChange={(v) => setDraft('opencodeApiKey', v)}
             onBlur={() => void persist()}
-            placeholder="sk-or-…"
-            getKeyUrl={PROVIDER_LINKS.openrouter}
+            placeholder="oc_sk_…"
+            getKeyUrl={PROVIDER_LINKS.opencode}
           />
         </div>
         <p className="relative -mt-1 flex items-center gap-1.5 px-3.5 pb-3 text-2xs text-ink-subtle">

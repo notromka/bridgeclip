@@ -23,7 +23,7 @@ type SectionTone = 'success' | 'warning' | 'danger' | 'idle'
 
 /** `showUpdates` changes each time Help → Check for Updates… asks for the Updates row. */
 export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): React.JSX.Element {
-  const { outputDirectory, pythonPath, customVocabulary, openrouterConfigured, zernioConfigured, saving, save, toolStatus, toolError, checkTools, checkingTools } =
+  const { outputDirectory, pythonPath, customVocabulary, opencodeConfigured, openrouterConfigured, zernioConfigured, saving, save, toolStatus, toolError, checkTools, checkingTools } =
     useSettingsStore()
   const keys = useApiKeyDrafts()
   const [isPackaged, setIsPackaged] = useState(true)
@@ -50,7 +50,8 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
   const tools = toolRows(toolStatus)
   const toolsChecked = tools.every((row) => row.ok != null)
   const toolsMissing = tools.filter((row) => !row.optional && row.ok === false).length
-  const keysMissing = Number(!openrouterConfigured)
+  const opencodeOk = opencodeConfigured || openrouterConfigured
+  const keysMissing = Number(!opencodeOk)
   const vocabularyTerms = customVocabulary.split('\n').filter((line) => line.trim()).length
 
   const sections: { id: SectionId; label: string; icon: ReactNode; tone: SectionTone }[] = [
@@ -70,7 +71,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
   }, [showUpdates])
 
   const checks: { label: string; ok: boolean | null; detail: string; section: SectionId; optional?: boolean; tone?: 'danger' }[] = [
-    { label: 'OpenRouter', ok: openrouterConfigured, detail: openrouterConfigured ? 'Key saved' : 'Needed to transcribe and pick clips', section: 'keys' },
+    { label: 'OpenCode Go', ok: opencodeOk, detail: opencodeOk ? 'Key saved' : 'Needed for Muse clip planning', section: 'keys' },
     { label: 'Tools', ok: toolsChecked ? toolsMissing === 0 : null, detail: !toolsChecked ? (checkingTools ? 'Checking…' : 'Not checked') : toolsMissing ? `${toolsMissing} missing` : 'All installed', section: 'system', tone: 'danger' },
     { label: 'Zernio', ok: zernioConfigured, detail: zernioConfigured ? 'Posting on' : 'Optional, for posting', section: 'keys', optional: true }
   ]
@@ -112,7 +113,7 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
                 <IconTile tone={blocking ? 'warning' : 'success'} size="lg">{blocking ? <KeyRound /> : <Check strokeWidth={3} />}</IconTile>
                 <div>
                   <h2 className="text-sm font-semibold text-ink">{blocking ? `${blocking} thing${blocking === 1 ? '' : 's'} to set up before clipping` : 'Ready to clip'}</h2>
-                  <p className="mt-0.5 text-xs text-ink-muted">{APP_NAME} runs on this computer. One OpenRouter key covers transcription and clip selection.</p>
+                  <p className="mt-0.5 text-xs text-ink-muted">{APP_NAME} runs on this computer. One OpenCode Go key covers Muse Spark clip planning.</p>
                 </div>
               </div>
             </div>
@@ -143,15 +144,15 @@ export function SettingsPage({ showUpdates = 0 }: { showUpdates?: number }): Rea
             <div className="mt-4 space-y-2">
               <KeyRow>
                 <ApiKeyInput
-                  label="OpenRouter"
-                  value={keys.drafts.openrouterApiKey}
-                  configured={openrouterConfigured}
-                  onChange={(v) => keys.setDraft('openrouterApiKey', v)}
-                  onRemove={() => void keys.remove('openrouterApiKey')}
+                  label="OpenCode Go"
+                  value={keys.drafts.opencodeApiKey}
+                  configured={opencodeOk}
+                  onChange={(v) => keys.setDraft('opencodeApiKey', v)}
+                  onRemove={() => void keys.remove('opencodeApiKey')}
                   onBlur={() => void keys.persist()}
-                  placeholder="sk-or-…"
-                  description="Transcribes with MAI Transcribe 2 and picks the moments worth clipping."
-                  getKeyUrl={PROVIDER_LINKS.openrouter}
+                  placeholder="oc_sk_…"
+                  description="Plans clips with Muse Spark 1.3 Contributor. Transcription runs locally (Parakeet-style) with visual fallback."
+                  getKeyUrl={PROVIDER_LINKS.opencode}
                 />
               </KeyRow>
               <p className="eyebrow px-1 pt-2">Optional</p>

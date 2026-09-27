@@ -1,11 +1,12 @@
 """
-Shared OpenRouter chat-completions call used by the clip planner and the
+Shared OpenCode Go chat-completions call used by the clip planner and the
 layout vision step. Normalizes errors into retryable / fatal and extracts
-billed usage.
+billed usage. (Legacy name kept for import compat; provider is OpenCode Go.)
 """
 
 import json
 import logging
+import uuid
 from typing import Any, Optional
 
 import httpx
@@ -19,7 +20,7 @@ RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 class OpenRouterError(Exception):
-    """An OpenRouter request failed. `retryable` marks transient failures."""
+    """An OpenCode Go request failed. `retryable` marks transient failures."""
 
     def __init__(self, message: str, retryable: bool = False):
         super().__init__(message)
@@ -74,40 +75,48 @@ async def chat_completion(
     try:
         async with client.stream(
             "POST", "/chat/completions", json=payload,
-            headers={"Accept-Encoding": "identity"}, follow_redirects=False,
+            headers={
+                "Accept-Encoding": "identity",
+                "User-Agent": "BridgeClip/0.1.18 (opencode-go)",
+                "X-Title": "BridgeClip AI Clipping Agent",
+                "HTTP-Referer": "https://github.com/notromka/bridgeclip",
+                "x-opencode-session": f"bridgeclip-{uuid.uuid4()}",
+            }, follow_redirects=False,
         ) as response:
             # Do not hand attacker-controlled compressed bodies to an unbounded
             # decompressor. The request explicitly negotiates an identity body.
             if response.headers.get("content-encoding", "identity").lower() != "identity":
-                raise OpenRouterError("OpenRouter returned an unsupported response encoding")
+                raise OpenRouterError("OpenCode Go returned an unsupported response encoding")
             content = bytearray()
             async for chunk in response.aiter_raw():
                 if len(chunk) > MAX_CHAT_RESPONSE_BYTES - len(content):
-                    raise OpenRouterError("OpenRouter response exceeds the size limit")
+                    raise OpenRouterError("OpenCode Go response exceeds the size limit")
                 content.extend(chunk)
             status = response.status_code
     except (httpx.TimeoutException, httpx.TransportError):
-        raise OpenRouterError("OpenRouter request failed", retryable=True) from None
+        raise OpenRouterError("OpenCode Go request failed", retryable=True) from None
 
     if status == 402:
         raise OpenRouterError(
-            "OpenRouter account is out of credits. Add credits at openrouter.ai/credits."
+            "OpenCode Go balance is out of credits. Check opencode.ai/auth billing."
         )
+    if status in (401, 403):
+        raise OpenRouterError("OpenCode Go rejected the API key. Check it in Settings.")
     if status != 200:
         raise OpenRouterError(
-            f"OpenRouter API error ({status})",
+            f"OpenCode Go API error ({status})",
             retryable=status in RETRYABLE_STATUS_CODES,
         )
     try:
         body = json.loads(content)
     except (ValueError, UnicodeError, RecursionError):
-        raise OpenRouterError("OpenRouter returned invalid JSON") from None
+        raise OpenRouterError("OpenCode Go returned invalid JSON") from None
     if not isinstance(body, dict):
-        raise OpenRouterError("OpenRouter returned an invalid response")
+        raise OpenRouterError("OpenCode Go returned an invalid response")
 
-    # OpenRouter can return 200 with an upstream provider error in the body.
+    # OpenCode Go can return 200 with an upstream provider error in the body.
     if body.get("error"):
-        raise OpenRouterError("OpenRouter provider error", retryable=True)
+        raise OpenRouterError("OpenCode Go provider error", retryable=True)
 
     usage = body.get("usage") or {}
     cost = usage.get("cost")
@@ -120,9 +129,13 @@ async def chat_completion(
     reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
 
     logger.info(
-        f"OpenRouter usage ({body.get('model', model)}): "
+        f"OpenCode Go usage ({body.get('model', model)}): "
         f"{usage_data['prompt_tokens']} prompt, "
         f"{usage_data['completion_tokens']} completion "
         f"({reasoning_tokens} reasoning), cost=${usage_data['cost'] if cost is not None else 'n/a'}"
     )
     return body, usage_data
+
+
+# Back-compat alias: new code imports OpenCodeError; old imports keep working.
+OpenCodeError = OpenRouterError

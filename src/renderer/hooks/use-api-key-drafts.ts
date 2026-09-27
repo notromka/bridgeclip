@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSettingsStore } from '../store/use-settings-store'
 import { errorMessage } from '../lib/utils'
 
-type KeyName = 'openrouterApiKey' | 'zernioApiKey'
+type KeyName = 'opencodeApiKey' | 'openrouterApiKey' | 'zernioApiKey'
 type Drafts = Record<KeyName, string>
 
 /** Keep edited fields local until saved; never persist untouched stale keys. */
@@ -15,7 +15,7 @@ export function useApiKeyDrafts(): {
   error: string | null
 } {
   const replaceApiKey = useSettingsStore((s) => s.replaceApiKey)
-  const [drafts, setDrafts] = useState<Drafts>({ openrouterApiKey: '', zernioApiKey: '' })
+  const [drafts, setDrafts] = useState<Drafts>({ opencodeApiKey: '', openrouterApiKey: '', zernioApiKey: '' })
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const dirty = useRef(new Set<KeyName>())
